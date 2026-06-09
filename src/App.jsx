@@ -127,7 +127,7 @@ export default function App() {
   return (
     <Shell syncing={syncing}>
       {state.phase === "setup" && <Setup state={state} commit={commit} />}
-      {state.phase === "draft" && <Draft state={state} commit={commit} />}
+      {(state.phase === "draftorder" || state.phase === "draft") && <Draft state={state} commit={commit} />}
       {state.phase === "play" && <Play state={state} commit={commit} />}
     </Shell>
   );
