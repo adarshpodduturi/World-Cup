@@ -33,6 +33,14 @@ const KO_POINTS = { R32: 3, R16: 6, QF: 9, SF: 12, FINAL: 15 };
 const KO_LABELS = { R32: "Round of 32", R16: "Round of 16", QF: "Quarterfinal", SF: "Semifinal", FINAL: "Final" };
 const KO_ROUNDS = ["R32", "R16", "QF", "SF", "FINAL"];
 
+// Individual awards: correct guess = +5 points each (max 15).
+const AWARDS = [
+  { key: "ball", label: "Golden Ball", hint: "Best player" },
+  { key: "boot", label: "Golden Boot", hint: "Top scorer" },
+  { key: "glove", label: "Golden Glove", hint: "Best goalkeeper" },
+];
+const AWARD_POINTS = 5;
+
 const emptyState = () => ({
   phase: "setup",            // setup | draft | play
   players: [],               // [{id, name}]
@@ -40,6 +48,9 @@ const emptyState = () => ({
   picks: {},                 // { nation: playerId }
   groupResults: {},          // { nation: { w, d, l } }
   koResults: {},             // { nation: { R32:true, R16:true, ... } }
+  awardGuesses: {},          // { playerId: { ball, boot, glove } }
+  awardWinners: {},          // { ball, boot, glove } — actual results
+  awardsLocked: false,       // host finalizes; guesses then read-only
   rev: 0,
 });
 
@@ -54,6 +65,20 @@ function koPoints(ko) {
   if (!ko) return 0;
   return KO_ROUNDS.reduce((s, r) => s + (ko[r] ? KO_POINTS[r] : 0), 0);
 }
+// Award bonus: +5 per guess that matches the actual winner (case/space-insensitive)
+function bonusPoints(state, playerId) {
+  const guesses = state.awardGuesses?.[playerId];
+  const winners = state.awardWinners || {};
+  if (!guesses) return 0;
+  const norm = (s) => (s || "").trim().toLowerCase();
+  let pts = 0;
+  for (const a of AWARDS) {
+    const g = norm(guesses[a.key]);
+    const w = norm(winners[a.key]);
+    if (g && w && g === w) pts += AWARD_POINTS;
+  }
+  return pts;
+}
 function playerScore(state, playerId) {
   let gs = 0, ko = 0;
   for (const nation of Object.keys(state.picks)) {
@@ -61,7 +86,8 @@ function playerScore(state, playerId) {
     gs += groupPoints(state.groupResults[nation]);
     ko += koPoints(state.koResults[nation]);
   }
-  return { gs, ko, total: gs + ko };
+  const bonus = bonusPoints(state, playerId);
+  return { gs, ko, bonus, total: gs + ko + bonus };
 }
 
 // snake draft sequence for N rounds
@@ -312,7 +338,7 @@ function Play({ state, commit }) {
   return (
     <>
       <div style={S.tabs}>
-        {[["standings", "Standings"], ["group", "Group stage"], ["ko", "Knockout"]].map(([k, l]) => (
+        {[["standings", "Standings"], ["group", "Group"], ["ko", "Knockout"], ["awards", "Awards"]].map(([k, l]) => (
           <button key={k} onClick={() => setTab(k)} style={tab === k ? S.tabOn : S.tab}>{l}</button>
         ))}
       </div>
@@ -323,7 +349,7 @@ function Play({ state, commit }) {
             <div key={p.id} style={S.standRow}>
               <span style={S.rank}>{i + 1}</span>
               <span style={{ flex: 1, fontWeight: 600 }}>{p.name}</span>
-              <span style={S.breakdown}>GS {p.gs} · KO {p.ko}</span>
+              <span style={S.breakdown}>GS {p.gs} · KO {p.ko} · BON {p.bonus}</span>
               <span style={S.totalPts}>{p.total}</span>
             </div>
           ))}
@@ -332,6 +358,82 @@ function Play({ state, commit }) {
 
       {tab === "group" && <GroupStage state={state} commit={commit} />}
       {tab === "ko" && <Knockout state={state} commit={commit} />}
+      {tab === "awards" && <Awards state={state} commit={commit} />}
+    </>
+  );
+}
+
+function Awards({ state, commit }) {
+  const locked = !!state.awardsLocked;
+
+  const setGuess = (pid, key, val) => {
+    commit((s) => {
+      const cur = s.awardGuesses[pid] || {};
+      return { ...s, awardGuesses: { ...s.awardGuesses, [pid]: { ...cur, [key]: val } } };
+    });
+  };
+  const setWinner = (key, val) => {
+    commit((s) => ({ ...s, awardWinners: { ...s.awardWinners, [key]: val } }));
+  };
+  const toggleLock = () => commit((s) => ({ ...s, awardsLocked: !s.awardsLocked }));
+
+  const norm = (x) => (x || "").trim().toLowerCase();
+
+  return (
+    <>
+      <Card title="Individual awards · +5 each">
+        <p style={S.note}>
+          Each player guesses the three award winners. Every correct guess is worth {AWARD_POINTS} points
+          (up to {AWARD_POINTS * 3}). {locked ? "Guesses are locked." : "Guesses can be edited until you lock them."}
+        </p>
+        {state.players.map((p) => {
+          const g = state.awardGuesses[p.id] || {};
+          return (
+            <div key={p.id} style={S.awardPlayer}>
+              <div style={S.awardName}>{p.name}</div>
+              <div style={S.awardGrid}>
+                {AWARDS.map((a) => {
+                  const winner = state.awardWinners?.[a.key];
+                  const correct = locked && winner && norm(g[a.key]) === norm(winner) && norm(g[a.key]);
+                  const wrong = locked && winner && norm(g[a.key]) && norm(g[a.key]) !== norm(winner);
+                  return (
+                    <div key={a.key} style={S.awardCell}>
+                      <label style={S.awardLabel}>{a.label}</label>
+                      <input
+                        value={g[a.key] || ""}
+                        disabled={locked}
+                        placeholder={a.hint}
+                        onChange={(e) => setGuess(p.id, a.key, e.target.value)}
+                        style={correct ? S.awardInputOk : wrong ? S.awardInputNo : S.awardInput}
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })}
+      </Card>
+
+      <Card title="Actual winners (host)">
+        <p style={S.note}>Enter the real award winners once announced, then lock to finalize scoring.</p>
+        <div style={S.awardGrid}>
+          {AWARDS.map((a) => (
+            <div key={a.key} style={S.awardCell}>
+              <label style={S.awardLabel}>{a.label}</label>
+              <input
+                value={state.awardWinners?.[a.key] || ""}
+                placeholder={a.hint}
+                onChange={(e) => setWinner(a.key, e.target.value)}
+                style={S.awardInput}
+              />
+            </div>
+          ))}
+        </div>
+        <button onClick={toggleLock} style={locked ? S.ghost : S.primary}>
+          {locked ? "Unlock guesses" : "Lock guesses & finalize"}
+        </button>
+      </Card>
     </>
   );
 }
@@ -581,6 +683,14 @@ const S = {
   chip: { padding: "7px 10px", background: "#fff", border: `2px solid ${ink}`, borderRadius: 3, fontWeight: 600, fontSize: 12 },
   chipOn: { padding: "7px 10px", background: gold, border: `2px solid ${ink}`, borderRadius: 3, fontWeight: 800, fontSize: 12 },
   chipLocked: { padding: "7px 10px", background: "#efece2", border: `2px dashed ${line}`, borderRadius: 3, fontWeight: 600, fontSize: 12, color: "#b4b0a0", cursor: "not-allowed" },
+  awardPlayer: { padding: "12px 0", borderBottom: `1px solid ${line}` },
+  awardName: { fontWeight: 800, fontSize: 14, marginBottom: 8 },
+  awardGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))", gap: 10 },
+  awardCell: { display: "flex", flexDirection: "column", gap: 4 },
+  awardLabel: { fontSize: 11, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", color: deep },
+  awardInput: { padding: "9px 11px", border: `2px solid ${line}`, borderRadius: 3, fontSize: 14 },
+  awardInputOk: { padding: "9px 11px", border: `2px solid #2a9d4a`, background: "#e8f6ec", borderRadius: 3, fontSize: 14, fontWeight: 600 },
+  awardInputNo: { padding: "9px 11px", border: `2px solid ${line}`, background: "#f6ecec", borderRadius: 3, fontSize: 14, color: "#9a6b6b" },
   outTag: { color: accent, fontWeight: 800, fontSize: 11, letterSpacing: "0.06em" },
   outBtn: { padding: "7px 10px", background: "#fff", border: `2px solid ${line}`, borderRadius: 3, fontWeight: 700, fontSize: 12, color: "#6b6857", marginLeft: "auto" },
   outBtnOn: { padding: "7px 10px", background: ink, border: `2px solid ${ink}`, borderRadius: 3, fontWeight: 700, fontSize: 12, color: "#fff", marginLeft: "auto" },
